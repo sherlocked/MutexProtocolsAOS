@@ -37,7 +37,7 @@ public class VectorClass {
 	for (int a = 0 ; a < numericalTimestamp.length ; a++) {
 		VectorClass.vectorTime[a] = Math.max(VectorClass.vectorTime[a],numericalTimestamp[a]);
 	}
-	VectorClass.vectorTime = increment(myProcessId);
+	VectorClass.vectorTime = VectorClass.increment(myProcessId);
     }
     
 }

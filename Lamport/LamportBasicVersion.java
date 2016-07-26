@@ -9,6 +9,7 @@ import com.sun.nio.sctp.MessageInfo;
 import com.sun.nio.sctp.SctpChannel;
 import com.sun.nio.sctp.SctpServerChannel;
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileReader;
@@ -17,6 +18,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.nio.ByteBuffer;
+import java.sql.Timestamp;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.PriorityQueue;
@@ -25,6 +27,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Semaphore;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import org.apache.commons.math3.distribution.ExponentialDistribution;
 
 /**
  *
@@ -80,9 +83,24 @@ public class LamportBasicVersion implements Runnable {
     //File writer clock variables
     static String filenameClock = "outputClock-";
     static File fileClock;
-    static FileWriter writerClock;
+    static FileWriter fw;
+    static BufferedWriter bw;
+    //Exponential Delay
+    static ExponentialDistribution csExecutionExpoDelay;
+    static ExponentialDistribution interRequestExpoDelay;
+    static double timestampDelayId;
+    static long timestampLongDelayId;
+    double timestampDelayCs;
+    long timestampLongDelayCs;
+    //Response time variables
+    static Timestamp timestamp1;
+    static Timestamp timestamp2;
+    static long responseTimeCalculation;
+    //Message complexity variables
+    static int totalMessageCount;
     
     public static void main(String[] args) throws FileNotFoundException, IOException, InterruptedException {
+        totalMessageCount = 0;
         //For parsing the file and storing the information
         String line;
         String configurationFile = "configuration.txt";
@@ -128,7 +146,13 @@ public class LamportBasicVersion implements Runnable {
         filenameClock = filenameClock + Integer.toString(myProcessId) + ".out";
         fileClock = new File(filenameClock);
         fileClock.createNewFile();
-        writerClock = new FileWriter(fileClock);
+        //writerClock = new FileWriter(fileClock);
+        fw = new FileWriter(fileClock);
+	bw = new BufferedWriter(fw);
+        //
+        // Expo mean insert
+        csExecutionExpoDelay = new ExponentialDistribution(csExecutionTime);
+        interRequestExpoDelay = new ExponentialDistribution(interRequestDelay);
         //
         System.out.println("********************************************************");
         System.out.println("My process id : " + myProcessId);
@@ -216,6 +240,7 @@ public class LamportBasicVersion implements Runnable {
                                 byteBufferToNeighbor.put(sendMessage.getBytes());
                                 byteBufferToNeighbor.flip();
                                 sctpChannel[k].send(byteBufferToNeighbor,messageInfoToNeighbor);
+                                totalMessageCount++;
                                 sctpChannel[k].close();
                             } catch (IOException ex) {
                                 Logger.getLogger(LamportBasicVersion.class.getName()).log(Level.SEVERE, null, ex);
@@ -250,7 +275,7 @@ public class LamportBasicVersion implements Runnable {
                         for (int z = 0 ; z < numberOfProcesses ; z++) {
                             conditionArray[z] = 0;
                         }
-			if (L2ConditionFlag == 0) {
+			if (L2ConditionFlag == 0 && outstandingRequest == 1) {
                             Integer[] queueArray = new Integer[queue.size()];
                             queue.toArray(queueArray);
                             Arrays.sort(queueArray);
@@ -289,9 +314,9 @@ public class LamportBasicVersion implements Runnable {
                             for (int s = 0 ; s <= delete ; s++) {
                                 queue.remove();
                             }
-                    	}
+                        }
 		    }
-		    if (L2ConditionFlag == 0) {
+		    if (L2ConditionFlag == 0 && outstandingRequest == 1) {
 		    	if (queue.size() != 0) {
                             Integer[] queueArray1 = new Integer[queue.size()];
                             queue.toArray(queueArray1);
@@ -355,7 +380,9 @@ public class LamportBasicVersion implements Runnable {
             int numberOfRequest = 1;
             while (numberOfRequest <= maxNumberOfRequest) {
                 try {
-                    Thread.sleep(interRequestDelay);
+                    timestampDelayId = interRequestExpoDelay.sample();
+                    timestampLongDelayId = (long)timestampDelayId;
+                    Thread.sleep(timestampLongDelayId);
                     //currentRequestBeingServed = numberOfRequest;
                     csEnter(numberOfRequest);
                 } catch (InterruptedException | IOException ex) {
@@ -364,6 +391,8 @@ public class LamportBasicVersion implements Runnable {
                 numberOfRequest++;
             }
             sendFinish();
+	    bw.write(String.valueOf(totalMessageCount));
+	    bw.flush();
         } catch (InterruptedException | IOException ex) {
             Logger.getLogger(LamportBasicVersion.class.getName()).log(Level.SEVERE, null, ex);
         }
@@ -387,6 +416,9 @@ public class LamportBasicVersion implements Runnable {
         String requestString = Integer.toString(lamportClock) + Integer.toString(myProcessId);
         currentRequestBeingServed = Integer.parseInt(requestString);
         queue.add(Integer.parseInt(requestString));
+        //Timesatmp to record response time
+        timestamp1 = new Timestamp(System.currentTimeMillis());
+	//
 	System.out.println("currentRequestServed : " + currentRequestBeingServed);
         outstandingRequest = 1;
         for (int k = 0 ; k < numberOfProcesses ; k++) {
@@ -407,6 +439,7 @@ public class LamportBasicVersion implements Runnable {
                     byteBufferToNeighbor.put(sendMessage.getBytes());
                     byteBufferToNeighbor.flip();
                     sctpChannel[k].send(byteBufferToNeighbor,messageInfoToNeighbor);
+                    totalMessageCount++;
                     sctpChannel[k].close();
                 } catch (IOException ex) {
                     Logger.getLogger(LamportBasicVersion.class.getName()).log(Level.SEVERE, null, ex);
@@ -512,7 +545,7 @@ public class LamportBasicVersion implements Runnable {
             currentRequestBeingServed = 0;
             enterCriticalSectionExecution();
         }
-
+        timestamp2 = new Timestamp(System.currentTimeMillis());
         //Basic End
         csExit(requestNumber,requestString);
         mutex.release();
@@ -528,8 +561,11 @@ public class LamportBasicVersion implements Runnable {
         }
     }
 
-    private void enterCriticalSectionExecution() throws IOException {
+    private void enterCriticalSectionExecution() throws IOException, InterruptedException {
         //Time for CS execution
+        timestampDelayCs = csExecutionExpoDelay.sample();
+        timestampLongDelayCs = (long)timestampDelayCs;
+        Thread.sleep(timestampLongDelayCs);
        	System.out.println("0000000000000000000000000000000000000000");
         System.out.println("Inside critical section");
         System.out.println("0000000000000000000000000000000000000000");
@@ -539,17 +575,29 @@ public class LamportBasicVersion implements Runnable {
         int[] vectorTimestamp = VectorClass.getVectorTime();
         for (int y = 0 ; y < vectorTimestamp.length ; y++) {
             if (y == 0) {
-                writerClock.write(vectorTimestamp[y]);
+                bw.write(String.valueOf(vectorTimestamp[y]));
+		bw.flush();
             }
             else {
-                writerClock.write(" ");
-                writerClock.write(vectorTimestamp[y]);
+                bw.write(" ");
+                bw.write(String.valueOf(vectorTimestamp[y]));
+		bw.flush();
             }
         }
-        writerClock.write("\n");
+        bw.write("\n");
+	bw.flush();
+        bw.write(String.valueOf(timestampLongDelayId));
+        bw.write(" ");
+        bw.write(String.valueOf(timestampLongDelayCs));
+        bw.write(" ");
     }
 
-    private void csExit(int requestNumber, String requestString) {
+    private void csExit(int requestNumber, String requestString) throws IOException {
+        //Response time
+        responseTimeCalculation = timestamp2.getTime() - timestamp1.getTime();
+        bw.write(String.valueOf(responseTimeCalculation));
+        bw.write("\n");
+	bw.flush();
         //Remove the request from queue
         queue.remove();
         //Getting the clock value from the rquest sent , the clock value may be different now
@@ -584,6 +632,7 @@ public class LamportBasicVersion implements Runnable {
                     byteBufferToNeighbor.put(sendMessage.getBytes());
                     byteBufferToNeighbor.flip();
                     sctpChannel[k].send(byteBufferToNeighbor,messageInfoToNeighbor);
+                    totalMessageCount++;
                     sctpChannel[k].close();
                 } catch (IOException ex) {
                     Logger.getLogger(LamportBasicVersion.class.getName()).log(Level.SEVERE, null, ex);
@@ -632,6 +681,7 @@ public class LamportBasicVersion implements Runnable {
                     byteBufferToNeighbor.put(sendMessage.getBytes());
                     byteBufferToNeighbor.flip();
                     sctpChannel[k].send(byteBufferToNeighbor,messageInfoToNeighbor);
+                    totalMessageCount++;
                     sctpChannel[k].close();
                 } catch (IOException ex) {
                     Logger.getLogger(LamportBasicVersion.class.getName()).log(Level.SEVERE, null, ex);
@@ -664,6 +714,7 @@ public class LamportBasicVersion implements Runnable {
                     byteBufferToNeighbor.put(sendMessage.getBytes());
                     byteBufferToNeighbor.flip();
                     sctpChannel[myProcessId].send(byteBufferToNeighbor,messageInfoToNeighbor);
+                    totalMessageCount++;
                     sctpChannel[myProcessId].close();
                 } catch (IOException ex) {
                     Logger.getLogger(LamportBasicVersion.class.getName()).log(Level.SEVERE, null, ex);
@@ -673,4 +724,3 @@ public class LamportBasicVersion implements Runnable {
     }
     
 }
-
